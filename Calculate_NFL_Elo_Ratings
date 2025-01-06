@@ -1,0 +1,426 @@
+#load necessary libraries
+library(tidyverse)
+library(readxl)
+library(nflplotR)
+library(writexl)
+
+#read in excel file with all game scores
+Games <- read_xlsx("~/Football Scores.xlsx")
+
+#change the name of Redskins to Commanders
+Games$Team <- ifelse(Games$Team == "Washington Redskins" |
+                       Games$Team == "Washington Football Team",
+                     "Washington Commanders", Games$Team)
+
+#change Oakland to Las Vegas
+Games$Team <- ifelse(Games$Team == "Oakland Raiders",
+                     "Las Vegas Raiders", Games$Team)
+
+#keep needed variables
+Games <- Games |>
+  select(Team, Final, Season, Week)
+
+#create a data frame of 2018 games
+Games2018 <- Games |>
+  filter(Season == "2018")
+
+#create a data frame of 2019 games
+Games2019 <- Games |>
+  filter(Season == "2019")
+
+#create a data frame of 2020 games
+Games2020 <- Games |>
+  filter(Season == "2020")
+
+#create a data frame of 2021 games
+Games2021 <- Games |>
+  filter(Season == "2021")
+
+#create a data frame of 2022 games
+Games2022 <- Games |>
+  filter(Season == "2022")
+
+#create a data frame of 2023 games
+Games2023 <- Games |>
+  filter(Season == "2023")
+
+#create a function to organize the data
+organize_data <- function(games, season){
+  #intialize elo rating variable
+  games$elo <- NA
+
+  #put a game number count on each game for each team
+  games <- games |>
+    group_by(Team) |>
+    mutate(Count = row_number()) |>
+    ungroup()
+
+  #create a num variable to enable splitting for home and away
+  games$num <- rep(c(1,2), nrow(games)/2)
+
+  #find away teams
+  away <- games |>
+    filter(num == 1) |>
+    select(Team, Final, elo, Count, Week)
+
+  #find home teams
+  home <- games |>
+    filter(num == 2) |>
+    select(Team, Final, elo, Count, Week)
+
+  #put home and away back together side-by-side
+  data <- cbind(away, home)
+
+  #rename columns
+  colnames(data) <- c("team1", "score1", "elo1", "count1", "Week1", "team2",
+                        "score2", "elo2", "count2", "Week2")
+
+  #add a column to indicate the season
+  data$Season <- season
+
+  #find the winner of each game
+  data$win <- ifelse(data$score1 > data$score2,
+                   1, 0)
+
+  #find the margin of victory
+  data$marg_win <- abs(data$score1 - data$score2)
+
+  #give each game a unique id
+  data$gameid <- 1:nrow(data)
+
+  #return the organized data
+  return(data)
+}
+
+#organize the data for each season
+data2018 <- organize_data(Games2018, 2018)
+data2019 <- organize_data(Games2019, 2019)
+data2020 <- organize_data(Games2020, 2020)
+data2021 <- organize_data(Games2021, 2021)
+data2022 <- organize_data(Games2022, 2022)
+data2023 <- organize_data(Games2023, 2023)
+
+
+#probability of a team winning given the two elo ratings
+prob_win <- function(team_rating, opp_team_rating, divisor = 450){
+return(1 / (1 + 10**((opp_team_rating - team_rating) / divisor)))
+}
+
+#calculates the updated elo rating for a team based on the teams
+calc_new_rating <- function(team_rating, outcome, prob_win, mov,
+                            opp_team_rating){
+return(team_rating + (mov * (2.2/((abs(opp_team_rating - team_rating))*0.001 + 2.2))
+                      * 20 * (outcome - prob_win)))
+}
+
+#read in the team key to add functionality for the teams (includes shortened team names and colors for plots)
+key <- read_xlsx("~/NFL_team_key.xlsx")
+
+data2018$elo1 <- ifelse(!duplicated(data2018$team1), 1500, NA)
+data2018$elo2 <- ifelse(!duplicated(data2018$team2), 1500, NA)
+
+#calculate 2018 ELOs
+# we for loop over the rows in the data2018 set
+# so each i is a different game
+for(i in 1:nrow(data2018)){
+# select the game id for the current game (used for indexing)
+gameid = data2018$gameid[i]
+# select the teams that play in game i
+team1 = data2018$team1[i]
+team2 = data2018$team2[i]
+# select the teams elo going into game i
+team1elo = data2018$elo1[i]
+team2elo = data2018$elo2[i] + 0
+# outcome of game i
+outcome = data2018$win[i]
+# calculate the probability of winning based on current elo
+prob1wins = prob_win(team1elo, team2elo)
+prob2wins = prob_win(team2elo, team1elo)
+# calculate the new elo rating for each team
+new_rating_team1 = calc_new_rating(team1elo, outcome, prob1wins,
+                                   log(abs(data2018$marg_win[i])+1),
+                                   team2elo)
+
+new_rating_team2 = calc_new_rating(team2elo, 1-outcome, prob2wins,
+                                   log(abs(data2018$marg_win[i])+1),
+                                   team1elo)
+#### update the new values in the data2018 frame
+# you should try and run these line-by-line to understand what this does!!!!
+# select the next row corresponding with team 1 and 2, respectively
+# we look for all the rows where team1 name is in and select the row corresponding to the NEXT game
+# same for team2
+team1_ind = (1:nrow(data2018))[((data2018$team1 == team1) | (data2018$team2 == team1)) &
+(data2018$gameid > gameid)][1]
+team2_ind = (1:nrow(data2018))[((data2018$team1 == team2) | (data2018$team2 == team2)) &
+(data2018$gameid > gameid)][1]
+# update team 1 elo
+# we first need to check if there is a next value for the team
+# if they do not go to the playoffs, there will be an NA at some point
+# then, we need to determine if their updated value should be for team1
+# or team2
+if(!is.na(team1_ind)){
+if(data2018$team1[team1_ind] == team1){ # see if they should be team 1
+data2018$elo1[team1_ind] = new_rating_team1 # update
+}else{ # otherwise team 2
+data2018$elo2[team1_ind] = new_rating_team1 # update
+}
+}
+# same as directly above
+if(!is.na(team2_ind)){
+if(data2018$team2[team2_ind] == team2){
+data2018$elo2[team2_ind] = new_rating_team2
+}else{
+data2018$elo1[team2_ind] = new_rating_team2
+}
+}
+}
+
+#intialize the elo data frame for 2018
+elo2018 <- data.frame(Team = NA, ELO = NA, Week = NA)
+
+#add in teams
+for(i in 1:nrow(data2018)){
+  elo2018 <- rbind(elo2018, c(data2018$team1[i], data2018$elo1[i], data2018$Week1[i]))
+  elo2018 <- rbind(elo2018, c(data2018$team2[i], data2018$elo2[i], data2018$Week2[i]))
+}
+
+#remove empty row
+elo2018 <- elo2018[-1,]
+
+#find the last game played by each team
+elo2018$final_instance <- ifelse(!duplicated(elo2018$Team, fromLast = TRUE),
+                       1, 0)
+
+#set elo and week as numeric
+elo2018$ELO <- as.numeric(elo2018$ELO)
+elo2018$Week <- as.numeric(elo2018$Week)
+
+#add in the key data
+elo2018 <- left_join(elo2018, key, by = "Team")
+
+#add the season
+elo2018 <- elo2018 |>
+  mutate(Season = 2018)
+
+#keep needed variables
+final_elo2018 <- elo2018 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+#create function for calculating elos
+calc_elo <- function(data, season, last_season){
+  #add the final elo ratings from last season to each team to start
+  data <- left_join(data, last_season,
+                    by = c("team1" = "Team"))
+
+  #move the elo variable
+  data$elo1 <- data$ELO
+
+  Remove old elo variable
+  data <- data |>
+    select(-ELO)
+
+  #adjust elo to transfer to new season
+  data$elo1 <- (data$elo1 + 1500)/2
+
+  #add elos to the second set of teams
+  data <- left_join(data, last_season, by = c("team2" = "Team"))
+
+  #move elos to elo2
+  data$elo2 <- data$ELO
+
+  #remove old elo variable
+  data <- data |>
+    select(-ELO)
+
+  #adjust elo to transfer to new season
+  data$elo2 <- (data$elo2 + 1500)/2
+
+  #calculate ELOs after 2018
+  # we for loop over the rows in the data set
+  # so each i is a different game
+  for(i in 1:nrow(data)){
+  # select the game id for the current game (used for indexing)
+  gameid = data$gameid[i]
+  # select the teams that play in game i
+  team1 = data$team1[i]
+  team2 = data$team2[i]
+  # select the teams elo going into game i
+  team1elo = data$elo1[i]
+  team2elo = data$elo2[i] + 0
+  # outcome of game i
+  outcome = data$win[i]
+  # calculate the probability of winning based on current elo
+  prob1wins = prob_win(team1elo, team2elo)
+  prob2wins = prob_win(team2elo, team1elo)
+  # calculate the new elo rating for each team
+  new_rating_team1 = calc_new_rating(team1elo, outcome, prob1wins,
+                                     log(abs(data$marg_win[i])+1),
+                                     team2elo)
+
+  new_rating_team2 = calc_new_rating(team2elo, 1-outcome, prob2wins,
+                                     log(abs(data$marg_win[i])+1),
+                                     team1elo)
+  #### update the new values in the data frame
+  # you should try and run these line-by-line to understand what this does!!!!
+  # select the next row corresponding with team 1 and 2, respectively
+  # we look for all the rows where team1 name is in and select the row corresponding to the NEXT game
+  # same for team2
+  team1_ind = (1:nrow(data))[((data$team1 == team1) | (data$team2 == team1)) &
+  (data$gameid > gameid)][1]
+  team2_ind = (1:nrow(data))[((data$team1 == team2) | (data$team2 == team2)) &
+  (data$gameid > gameid)][1]
+  # update team 1 elo
+  # we first need to check if there is a next value for the team
+  # if they do not go to the playoffs, there will be an NA at some point
+  # then, we need to determine if their updated value should be for team1
+  # or team2
+  if(!is.na(team1_ind)){
+  if(data$team1[team1_ind] == team1){ # see if they should be team 1
+  data$elo1[team1_ind] = new_rating_team1 # update
+  }else{ # otherwise team 2
+  data$elo2[team1_ind] = new_rating_team1 # update
+  }
+  }
+  # same as directly above
+  if(!is.na(team2_ind)){
+    if(data$team2[team2_ind] == team2){
+      data$elo2[team2_ind] = new_rating_team2
+    }else{
+      data$elo1[team2_ind] = new_rating_team2
+    }
+  }
+}
+
+#intialize elo variable
+elo <- data.frame(Team = NA, ELO = NA, Week = NA)
+
+#add teams to the elo data
+for(i in 1:nrow(data)){
+  elo <- rbind(elo, c(data$team1[i], data$elo1[i], data$Week1[i]))
+  elo <- rbind(elo, c(data$team2[i], data$elo2[i], data$Week2[i]))
+}
+
+#remove empty row
+elo <- elo[-1,]
+
+#find final game for each team
+elo$final_instance <- ifelse(!duplicated(elo$Team, fromLast = TRUE),
+                       1, 0)
+
+#set elo and week to numeric
+elo$ELO <- as.numeric(elo$ELO)
+elo$Week <- as.numeric(elo$Week)
+
+#add key data to elos
+elo <- left_join(elo, key, by = "Team")
+
+#add season
+elo <- elo |>
+  mutate(Season = season)
+
+#return elo data
+return(elo)
+}
+
+#calculate elos for each team and for each season after 2018 and record season-ending elos for all teams
+elo2019 <- calc_elo(data2019, 2019, final_elo2018)
+
+final_elo2019 <- elo2019 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+elo2020 <- calc_elo(data2020, 2020, final_elo2019)
+
+final_elo2020 <- elo2020 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+elo2021 <- calc_elo(data2021, 2021, final_elo2020)
+
+final_elo2021 <- elo2021 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+elo2022 <- calc_elo(data2022, 2022, final_elo2021)
+
+final_elo2022 <- elo2022 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+elo2023 <- calc_elo(data2023, 2023, final_elo2022)
+
+final_elo2023 <- elo2023 |>
+  filter(final_instance == 1) |>
+  select(Team, ELO)
+
+#2018
+final_elo2018 <- left_join(final_elo2018, key, by = "Team")
+
+#2019
+final_elo2019 <- left_join(final_elo2019, key, by = "Team")
+
+#2020
+final_elo2020 <- left_join(final_elo2020, key, by = "Team")
+
+#2021
+final_elo2021 <- left_join(final_elo2021, key, by = "Team")
+
+#2022
+final_elo2022 <- left_join(final_elo2022, key, by = "Team")
+
+#2023
+final_elo2023 <- left_join(final_elo2023, key, by = "Team")
+
+#add all season-ending elos to a single data set
+final_elos <- rbind(final_elo2018,
+                    final_elo2019,
+                    final_elo2020,
+                    final_elo2021,
+                    final_elo2022,
+                    final_elo2023)
+
+#add all elos from each week to a single data set
+weekly_elos <- rbind(elo2018,
+                    elo2019,
+                    elo2020,
+                    elo2021,
+                    elo2022,
+                    elo2023)
+
+#add all game data to a single data set
+games_elo <- rbind(data2018,
+                    data2019,
+                    data2020,
+                    data2021,
+                    data2022,
+                    data2023)
+
+#combine the game data with the elos for team1
+games_elo <- left_join(games_elo, weekly_elos, by = c("team1" = "Team",
+                                                      "Week1" = "Week",
+                                                      "Season"))
+
+#move elos to elo1
+games_elo$elo1 <- games_elo$ELO
+
+#remove unwanted variables
+games_elo <- games_elo |>
+  select(-c(ELO, final_instance, Short))
+
+#combine the game data with the elos for team1
+games_elo <- left_join(games_elo, weekly_elos, by = c("team2" = "Team",
+                                                      "Week2" = "Week",
+                                                      "Season"))
+
+#move elos to elo2
+games_elo$elo2 <- games_elo$ELO
+
+#remove unwanted variables
+games_elo <- games_elo |>
+  select(-c(ELO, final_instance, Short))
+
+#write data into excel files to be used for analyses
+write_xlsx(final_elos, path= "~/NFL_Season_ELO.xlsx")
+write_xlsx(weekly_elos, path= "~/NFL_Weekly_ELO.xlsx")
+write_xlsx(games_elo, path= "~/NFL_Games_ELO.xlsx")
